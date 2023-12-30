@@ -48,7 +48,7 @@ parser.add_argument(
     "-i",
     "--img_path",
     type = str,
-    default = 'RawData/imagesTr/img0036.nii.gz',
+    default = './RawData/Training/img/img0001.nii.gz',
     help = "path to the image file",
 )
 
@@ -56,7 +56,7 @@ parser.add_argument(
     "-l",
     "--label_path",
     type = str,
-    default = 'RawData/labelsTr/label0036.nii.gz',
+    default = './RawData/Training/label/label0001.nii.gz',
     help = "path to the label file",
 )
 
@@ -72,6 +72,7 @@ parser.add_argument(
     "-a",
     "--all_slice",
     action = 'store_true',
+    default = False,
     help = "get all alice",
 )
 
@@ -87,7 +88,7 @@ parser.add_argument(
     "-s",
     "--slice_index",
     type = int,
-    default = 150,
+    default = 100,
     help = "slice_index",
 )
 
@@ -101,7 +102,7 @@ parser.add_argument(
 parser.add_argument(
     "--device", 
     type=str, 
-    default="cpu", 
+    default="cuda", 
     help="device"
 )
 
