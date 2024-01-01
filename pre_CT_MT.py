@@ -1,185 +1,154 @@
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# %% import packages
-# pip install connected-components-3d
-import numpy as np
+"""
+Created on April 6 19:25:36 2023
 
-# import nibabel as nib
+convert CT nii image to npz files, including input image, image embeddings, and ground truth
+
+@author: jma
+"""
+#%% import packages
+import numpy as np
 import SimpleITK as sitk
 import os
-
-join = os.path.join
-from skimage import transform
+join = os.path.join 
+from skimage import transform, io, segmentation
 from tqdm import tqdm
-import cc3d
+import torch
+from segment_anything import SamPredictor, sam_model_registry
+from segment_anything.utils.transforms import ResizeLongestSide
+import argparse
 
-# convert nii image to npz files, including original image and corresponding masks
-modality = "CT"
-img_name_suffix = ".nii.gz"
-gt_name_suffix = ".nii.gz"
-prefix = modality + "_" 
+# set up the parser
+parser = argparse.ArgumentParser(description='preprocess CT images')
+parser.add_argument('-i', '--nii_path', type=str, default='RawData/Testing/img', help='path to the nii images')
+parser.add_argument('-gt', '--gt_path', type=str, default='RawData/Training/label', help='path to the ground truth',)
+parser.add_argument('-o', '--npz_path', type=str, default='data/', help='path to save the npz files')
 
-nii_path = "RawData/Training/img"  # path to the nii images
-gt_path = "RawData/Training/label"  # path to the ground truth
-npy_path = "RawData/npy/" + prefix[:-1]
-os.makedirs(join(npy_path, "gts"), exist_ok=True)
-os.makedirs(join(npy_path, "imgs"), exist_ok=True)
+parser.add_argument('--image_size', type=int, default=256, help='image size')
+parser.add_argument('--modality', type=str, default='CT', help='modality')
 
-image_size = 1024
-voxel_num_thre2d = 100
-voxel_num_thre3d = 1000
+parser.add_argument('--img_name_suffix', type=str, default='.nii.gz', help='image name suffix')
+parser.add_argument('--label_id', type=int, default=9, help='label id')
+parser.add_argument('--prefix', type=str, default='CT_Abd-Gallbladder_', help='prefix')
+parser.add_argument('--model_type', type=str, default='vit_b', help='model type')
+parser.add_argument('--checkpoint', type=str, default='models/sam_vit_b_01ec64.pth', help='checkpoint')
+parser.add_argument('--device', type=str, default='cuda:0', help='device')
+# seed
+parser.add_argument('--seed', type=int, default=2023, help='random seed')
+args = parser.parse_args()
 
-img_names = sorted(os.listdir(nii_path))
-lbl_names = sorted(os.listdir(gt_path))
-print(f"ori \# files {len(lbl_names)=}")
-# names = [
-#     name
-#     for name in names
-#     if os.path.exists(join(nii_path, name.split(gt_name_suffix)[0] + img_name_suffix))
-# ]
-print(f"after sanity check \# files {len(lbl_names)=}")
 
-# set label ids that are excluded
-remove_label_ids = [
-    12
-]  # remove deodenum since it is scattered in the image, which is hard to specify with the bounding box
-tumor_id = None  # only set this when there are multiple tumors; convert semantic masks to instance masks
-# set window level and width
-# https://radiopaedia.org/articles/windowing-ct
-WINDOW_LEVEL = 40  # only for CT images
-WINDOW_WIDTH = 400  # only for CT images
+names = sorted(os.listdir(args.gt_path))
+print(names)
+#names = [name for name in names if os.path.exists(join(args.npz_path, name.split('.nii.gz')[0]+'.npz'))]
+test_names = ['img'+name.split('.')[0][5:]+'.nii.gz' for name in names]
 
-# %% save preprocessed images and masks as npz files
-index = 0
-for lblname in tqdm(lbl_names[:40]):  # use the remaining 10 cases for validation
-    image_name = img_names[index]
-    index+=1
-    
-    gt_name = lblname
+print(names)
+# split names into training and testing
+np.random.seed(args.seed)
+
+#train_names = sorted(names[:int(len(names)*0.8)])
+#test_names = sorted(names[int(len(names)*0.8):])
+
+# def preprocessing function
+def preprocess_ct(gt_path, nii_path, gt_name, image_name, label_id, image_size, sam_model, device):
     gt_sitk = sitk.ReadImage(join(gt_path, gt_name))
-    gt_data_ori = np.uint8(sitk.GetArrayFromImage(gt_sitk))
-    # remove label ids
-    for remove_label_id in remove_label_ids:
-        gt_data_ori[gt_data_ori == remove_label_id] = 0
-    # label tumor masks as instances and remove from gt_data_ori
-    if tumor_id is not None:
-        tumor_bw = np.uint8(gt_data_ori == tumor_id)
-        gt_data_ori[tumor_bw > 0] = 0
-        # label tumor masks as instances
-        tumor_inst, tumor_n = cc3d.connected_components(
-            tumor_bw, connectivity=26, return_N=True
-        )
-        # put the tumor instances back to gt_data_ori
-        gt_data_ori[tumor_inst > 0] = (
-            tumor_inst[tumor_inst > 0] + np.max(gt_data_ori) + 1
-        )
+    gt_data = sitk.GetArrayFromImage(gt_sitk)
+    gt_data = np.uint8(gt_data==label_id)
 
-    # exclude the objects with less than 1000 pixels in 3D
-    gt_data_ori = cc3d.dust(
-        gt_data_ori, threshold=voxel_num_thre3d, connectivity=26, in_place=True
-    )
-    # remove small objects with less than 100 pixels in 2D slices
-
-    for slice_i in range(gt_data_ori.shape[0]):
-        gt_i = gt_data_ori[slice_i, :, :]
-        # remove small objects with less than 100 pixels
-        # reason: fro such small objects, the main challenge is detection rather than segmentation
-        gt_data_ori[slice_i, :, :] = cc3d.dust(
-            gt_i, threshold=voxel_num_thre2d, connectivity=8, in_place=True
-        )
-    # find non-zero slices
-    z_index, _, _ = np.where(gt_data_ori > 0)
-    z_index = np.unique(z_index)
-
-    if len(z_index) > 0:
-        # crop the ground truth with non-zero slices
-        gt_roi = gt_data_ori[z_index, :, :]
-        # load image and preprocess
+    if np.sum(gt_data)>1000:
+        imgs = []
+        gts =  []
+        img_embeddings = []
+        assert np.max(gt_data)==1 and np.unique(gt_data).shape[0]==2, 'ground truth should be binary'
         img_sitk = sitk.ReadImage(join(nii_path, image_name))
         image_data = sitk.GetArrayFromImage(img_sitk)
         # nii preprocess start
-        if modality == "CT":
-            lower_bound = WINDOW_LEVEL - WINDOW_WIDTH / 2
-            upper_bound = WINDOW_LEVEL + WINDOW_WIDTH / 2
-            image_data_pre = np.clip(image_data, lower_bound, upper_bound)
-            image_data_pre = (
-                (image_data_pre - np.min(image_data_pre))
-                / (np.max(image_data_pre) - np.min(image_data_pre))
-                * 255.0
-            )
-        else:
-            lower_bound, upper_bound = np.percentile(
-                image_data[image_data > 0], 0.5
-            ), np.percentile(image_data[image_data > 0], 99.5)
-            image_data_pre = np.clip(image_data, lower_bound, upper_bound)
-            image_data_pre = (
-                (image_data_pre - np.min(image_data_pre))
-                / (np.max(image_data_pre) - np.min(image_data_pre))
-                * 255.0
-            )
-            image_data_pre[image_data == 0] = 0
-
+        lower_bound = -500
+        upper_bound = 1000
+        image_data_pre = np.clip(image_data, lower_bound, upper_bound)
+        image_data_pre = (image_data_pre - np.min(image_data_pre))/(np.max(image_data_pre)-np.min(image_data_pre))*255.0
+        image_data_pre[image_data==0] = 0
         image_data_pre = np.uint8(image_data_pre)
-        img_roi = image_data_pre[z_index, :, :]
-        np.savez_compressed(join(npy_path, prefix + gt_name.split(gt_name_suffix)[0]+'.npz'), imgs=img_roi, gts=gt_roi, spacing=img_sitk.GetSpacing())
-        # save the image and ground truth as nii files for sanity check;
-        # they can be removed
-        img_roi_sitk = sitk.GetImageFromArray(img_roi)
-        gt_roi_sitk = sitk.GetImageFromArray(gt_roi)
-        sitk.WriteImage(
-            img_roi_sitk,
-            join(npy_path, prefix + gt_name.split(gt_name_suffix)[0] + "_img.nii.gz"),
-        )
-        sitk.WriteImage(
-            gt_roi_sitk,
-            join(npy_path, prefix + gt_name.split(gt_name_suffix)[0] + "_gt.nii.gz"),
-        )
-        # save the each CT image as npy file
-        for i in range(img_roi.shape[0]):
-            img_i = img_roi[i, :, :]
-            img_3c = np.repeat(img_i[:, :, None], 3, axis=-1)
-            resize_img_skimg = transform.resize(
-                img_3c,
-                (image_size, image_size),
-                order=3,
-                preserve_range=True,
-                mode="constant",
-                anti_aliasing=True,
-            )
-            resize_img_skimg_01 = (resize_img_skimg - resize_img_skimg.min()) / np.clip(
-                resize_img_skimg.max() - resize_img_skimg.min(), a_min=1e-8, a_max=None
-            )  # normalize to [0, 1], (H, W, 3)
-            gt_i = gt_roi[i, :, :]
-            resize_gt_skimg = transform.resize(
-                gt_i,
-                (image_size, image_size),
-                order=0,
-                preserve_range=True,
-                mode="constant",
-                anti_aliasing=False,
-            )
-            resize_gt_skimg = np.uint8(resize_gt_skimg)
-            assert resize_img_skimg_01.shape[:2] == resize_gt_skimg.shape
-            np.save(
-                join(
-                    npy_path,
-                    "imgs",
-                    prefix
-                    + gt_name.split(gt_name_suffix)[0]
-                    + "-"
-                    + str(i).zfill(3)
-                    + ".npy",
-                ),
-                resize_img_skimg_01,
-            )
-            np.save(
-                join(
-                    npy_path,
-                    "gts",
-                    prefix
-                    + gt_name.split(gt_name_suffix)[0]
-                    + "-"
-                    + str(i).zfill(3)
-                    + ".npy",
-                ),
-                resize_gt_skimg,
-            )
+        
+        z_index, _, _ = np.where(gt_data>0)
+        z_min, z_max = np.min(z_index), np.max(z_index)
+        
+        for i in range(z_min, z_max):
+            gt_slice_i = gt_data[i,:,:]
+            gt_slice_i = transform.resize(gt_slice_i, (image_size, image_size), order=0, preserve_range=True, mode='constant', anti_aliasing=False)
+            if np.sum(gt_slice_i)>100:
+                img_slice_i = transform.resize(image_data_pre[i,:,:], (image_size, image_size), order=3, preserve_range=True, mode='constant', anti_aliasing=True)
+                # convert to three channels
+                img_slice_i = np.uint8(np.repeat(img_slice_i[:,:,None], 3, axis=-1))
+                assert len(img_slice_i.shape)==3 and img_slice_i.shape[2]==3, 'image should be 3 channels'
+                assert img_slice_i.shape[0]==gt_slice_i.shape[0] and img_slice_i.shape[1]==gt_slice_i.shape[1], 'image and ground truth should have the same size'
+                imgs.append(img_slice_i)
+                assert np.sum(gt_slice_i)>100, 'ground truth should have more than 100 pixels'
+                gts.append(gt_slice_i)
+                if sam_model is not None:
+                    sam_transform = ResizeLongestSide(sam_model.image_encoder.img_size)
+                    resize_img = sam_transform.apply_image(img_slice_i)
+                    # resized_shapes.append(resize_img.shape[:2])
+                    resize_img_tensor = torch.as_tensor(resize_img.transpose(2, 0, 1)).to(device)
+                    # model input: (1, 3, 1024, 1024)
+                    input_image = sam_model.preprocess(resize_img_tensor[None,:,:,:]) # (1, 3, 1024, 1024)
+                    assert input_image.shape == (1, 3, sam_model.image_encoder.img_size, sam_model.image_encoder.img_size), 'input image should be resized to 1024*1024'
+                    # input_imgs.append(input_image.cpu().numpy()[0])
+                    with torch.no_grad():
+                        embedding = sam_model.image_encoder(input_image)
+                        img_embeddings.append(embedding.cpu().numpy()[0])
+
+    if sam_model is not None:
+        return imgs, gts, img_embeddings
+    else:
+        return imgs, gts
+
+
+#%% prepare the save path
+save_path_tr = join(args.npz_path,  'train')
+save_path_ts = join(args.npz_path,  'test')
+os.makedirs(save_path_tr, exist_ok=True)
+os.makedirs(save_path_ts, exist_ok=True)
+
+#%% set up the model
+sam_model = sam_model_registry[args.model_type](checkpoint=args.checkpoint).to(args.device)
+
+# for name in tqdm(train_names):
+#     image_name = name
+#     gt_name = 'label'+name[3:]
+#     imgs, gts, img_embeddings = preprocess_ct(args.gt_path, args.nii_path, gt_name, image_name, args.label_id, args.image_size, sam_model, args.device)
+#     #%% save to npz file
+#     # stack the list to array
+#     if len(imgs)>1:
+#         imgs = np.stack(imgs, axis=0) # (n, 256, 256, 3)
+#         gts = np.stack(gts, axis=0) # (n, 256, 256)
+#         img_embeddings = np.stack(img_embeddings, axis=0) # (n, 1, 256, 64, 64)
+#         np.savez_compressed(join(save_path_tr, gt_name.split('.nii.gz')[0]+'.npz'), imgs=imgs, gts=gts, img_embeddings=img_embeddings)
+#         # save an example image for sanity check
+#         idx = np.random.randint(0, imgs.shape[0])
+#         img_idx = imgs[idx,:,:,:]
+#         gt_idx = gts[idx,:,:]
+#         bd = segmentation.find_boundaries(gt_idx, mode='inner')
+#         img_idx[bd, :] = [255, 0, 0]
+#         io.imsave(save_path_tr+name[3:7] + '.png', img_idx, check_contrast=False)
+
+# save testing data
+for name in tqdm(test_names):
+    image_name = name
+    
+    imgs, gts = preprocess_ct(args.gt_path, args.nii_path, gt_name, image_name, args.label_id, args.image_size, sam_model=None, device=args.device)
+    #%% save to npz file
+    if len(imgs)>1:
+        imgs = np.stack(imgs, axis=0) # (n, 256, 256, 3)
+        gts = np.stack(gts, axis=0) # (n, 256, 256)
+        img_embeddings = np.stack(img_embeddings, axis=0) # (n, 1, 256, 64, 64)
+        np.savez_compressed(join(save_path_ts, prefix + '_' + gt_name.split('.nii.gz')[0]+'.npz'), imgs=imgs, gts=gts)
+        # save an example image for sanity check
+        idx = np.random.randint(0, imgs.shape[0])
+        img_idx = imgs[idx,:,:,:]
+        gt_idx = gts[idx,:,:]
+        bd = segmentation.find_boundaries(gt_idx, mode='inner')
+        img_idx[bd, :] = [255, 0, 0]
+        io.imsave(save_path_ts + '.png', img_idx, check_contrast=False)

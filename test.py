@@ -1,6 +1,6 @@
 from segment_anything import sam_model_registry, SamPredictor
 from collections import defaultdict
-from utils import adjustMethod1
+
 from classifier.model import AlexNet
 
 import matplotlib.pyplot as plt
@@ -14,7 +14,16 @@ import sys
 import json
 
 flag = False
- 
+def adjustMethod1(data_resampled, w_width=400, w_center=40):
+    val_min = w_center - (w_width / 2)
+    val_max = w_center + (w_width / 2)
+
+    data_adjusted = data_resampled.copy()
+    data_adjusted[data_resampled < val_min] = val_min
+    data_adjusted[data_resampled > val_max] = val_max
+
+    return data_adjusted
+
 def show_mask(mask, ax, random_color=False):
     if random_color:
         color = np.concatenate([np.random.random(3), np.array([0.6])], axis=0)
@@ -48,7 +57,7 @@ parser.add_argument(
     "-i",
     "--img_path",
     type = str,
-    default = './RawData/Training/img/img0001.nii.gz',
+    default = './RawData/Training/img/img0037.nii.gz',
     help = "path to the image file",
 )
 
@@ -56,7 +65,7 @@ parser.add_argument(
     "-l",
     "--label_path",
     type = str,
-    default = './RawData/Training/label/label0001.nii.gz',
+    default = './RawData/Training/label/label0037.nii.gz',
     help = "path to the label file",
 )
 
@@ -72,7 +81,7 @@ parser.add_argument(
     "-a",
     "--all_slice",
     action = 'store_true',
-    default = False,
+    default = True,
     help = "get all alice",
 )
 
@@ -110,7 +119,7 @@ parser.add_argument(
     "-chk",
     "--checkpoint",
     type=str,
-    default="./models/sam_vit_b_01ec64.pth",
+    default="./work_dir/SAM-ViT-B/sam_model_best.pth",
     help="path to the trained model",
 )
 
@@ -340,7 +349,11 @@ if args.all_slice == True :
         output_file_img = 'slice/img.png'
         plt.imsave(output_file_img, image, cmap='gray')
         image = cv2.imread(output_file_img)
-        rs1, rs2, rs3 = segment_it(image, label)
+        try:
+            rs1, rs2, rs3 = segment_it(image, label)
+        except:
+            totslice -= 1
+            continue
         if rs1 == -1 :
             totslice -= 1
         else :
@@ -355,7 +368,11 @@ if args.all_slice == True :
         output_file_img = 'slice/img.png'
         plt.imsave(output_file_img, image, cmap='gray')
         image = cv2.imread(output_file_img)
-        rs1, rs2, rs3 = segment_it(image, label)
+        try:
+            rs1, rs2, rs3 = segment_it(image, label)
+        except:
+            totslice -= 1
+            continue
         if rs1 == -1 :
             totslice -= 1
         else :
@@ -370,7 +387,11 @@ if args.all_slice == True :
         output_file_img = 'slice/img.png'
         plt.imsave(output_file_img, image, cmap='gray')
         image = cv2.imread(output_file_img)
-        rs1, rs2, rs3 = segment_it(image, label, classify=args.classify)
+        try:
+            rs1, rs2, rs3 = segment_it(image, label, classify=args.classify)
+        except:
+            totslice -= 1
+            continue
         if rs1 == -1 :
             totslice -= 1
         else :
