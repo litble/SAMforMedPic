@@ -150,6 +150,7 @@ device = args.device
 sam = sam_model_registry["vit_b"](checkpoint=sam_checkpoint)
 sam.to(device=device)
 predictor = SamPredictor(sam)
+random.seed(42)
 
 # load classifier model
 if(args.classify):
