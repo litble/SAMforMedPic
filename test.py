@@ -57,7 +57,7 @@ parser.add_argument(
     "-i",
     "--img_path",
     type = str,
-    default = './RawData/Training/img/img0037.nii.gz',
+    default = './RawData/imagesTr/img0035.nii.gz',
     help = "path to the image file",
 )
 
@@ -65,7 +65,7 @@ parser.add_argument(
     "-l",
     "--label_path",
     type = str,
-    default = './RawData/Training/label/label0037.nii.gz',
+    default = './RawData/labelsTr/label0035.nii.gz',
     help = "path to the label file",
 )
 
@@ -119,12 +119,13 @@ parser.add_argument(
     "-chk",
     "--checkpoint",
     type=str,
-    default="./work_dir/SAM-ViT-B/sam_model_best.pth",
+    default="./models/sam_vit_b_01ec64.pth",
     help="path to the trained model",
 )
 
 parser.add_argument(
-    "--calssifier_path",
+    "-clp",
+    "--classifier_path",
     type=str,
     default="./models/AlexNet_24.pth",
     help="path to the classifier model",
@@ -134,7 +135,7 @@ parser.add_argument(
     "-c",
     "--classify",
     action = 'store_true',
-    default = True,
+    default = False,
     help = "Whether classifier is needed",
 )
 
@@ -155,7 +156,7 @@ random.seed(42)
 # load classifier model
 if(args.classify):
     classifier = AlexNet(num_classes = 13, init_weights = True)
-    classifier.load_state_dict(torch.load(args.calssifier_path))
+    classifier.load_state_dict(torch.load(args.classifier_path))
     classifier.to(device)
 
 def get_box(points):
@@ -233,6 +234,7 @@ def segment_it(image, label, classify=False):
 
     mdice1 = 0
     tot1 = 0
+    acc1 = 0
     for num, points in label_sets.items():
         prompt_point = np.array(get_single_point(points))
         prompt_label = np.array([1])
@@ -251,6 +253,8 @@ def segment_it(image, label, classify=False):
             classifier_input = torch.Tensor(img_with_mask.transpose(2, 0, 1))
             classifier_output = classifier(classifier_input.to(device))
             predict_y = torch.max(classifier_output, dim=0)[1]
+            if(predict_y.item() == num - 1):
+                acc1 = acc1 + 1
         
         if(args.visible):
             show_mask(mask, ax[0][1], True)
@@ -264,6 +268,7 @@ def segment_it(image, label, classify=False):
 
     mdice2 = 0
     tot2 = 0
+    acc2 = 0
     for num, points in label_sets.items():
         prompt_points = np.array(get_multi_points(points))
         prompt_labels = np.array([1] * prompt_points.shape[0])
@@ -282,6 +287,8 @@ def segment_it(image, label, classify=False):
             classifier_input = torch.Tensor(img_with_mask.transpose(2, 0, 1))
             classifier_output = classifier(classifier_input.to(device))
             predict_y = torch.max(classifier_output, dim=0)[1]
+            if(predict_y.item() == num - 1):
+                acc2 = acc2 + 1
 
         if(args.visible):
             show_mask(mask, ax[1][0], True)
@@ -290,10 +297,11 @@ def segment_it(image, label, classify=False):
                 show_label(np.array(get_box(points)), ax[1][0], int(predict_y)+1)
 
     mdice2 = mdice2 / tot2
-    print(f"mdice of multiple prompts is {mdice2}")   
+    print(f"mdice of multiple prompts is {mdice2}")
 
     mdice3 = 0
     tot3 = 0
+    acc3 = 0
     for num, points in label_sets.items():
         prompt_box = np.array(get_box(points))
         mask, scores, logits = predictor.predict(
@@ -310,6 +318,8 @@ def segment_it(image, label, classify=False):
             classifier_input = torch.Tensor(img_with_mask.transpose(2, 0, 1))
             classifier_output = classifier(classifier_input.to(device))
             predict_y = torch.max(classifier_output, dim=0)[1]
+            if(predict_y.item() == num - 1):
+                acc3 = acc3 + 1
             #print(f"True category : {num}, Recognized category: {predict_y+1}")
         
         if(args.visible):
@@ -321,13 +331,21 @@ def segment_it(image, label, classify=False):
 
     mdice3 = mdice3 / tot3
     print(f"mdice of box prompt is {mdice3}")
+    if(classify):
+        acc1 = acc1 / tot1
+        acc2 = acc2 / tot2
+        acc3 = acc3 / tot3
+        print(f"classification accuracy of single point prompt is {acc1}")
+        print(f"classification accuracy of multiple point prompt is {acc2}")
+        print(f"classification accuracy of box prompt is {acc3}")
+
 
     if(args.visible):
         plt.axis('on')
         plt.savefig('slice/slice.png') # savefig() should be front of show()
         plt.show()
     
-    return mdice1, mdice2, mdice3
+    return mdice1, mdice2, mdice3, acc1, acc2, acc3
 
 def get_slice(data, dim, slice_index):
     if (dim == 0):
@@ -344,6 +362,41 @@ if args.all_slice == True :
     totdice2 = 0
     totdice3 = 0
     totslice = width + height + channel
+
+    totacc1 = 0
+    totacc2 = 0
+    totacc3 = 0
+    totchannel = channel
+    for i in range(channel):
+        image = adjustMethod1(get_slice(img, 2, i))
+        label = get_slice(lab, 2, i)
+        output_file_img = 'slice/img.png'
+        plt.imsave(output_file_img, image, cmap='gray')
+        image = cv2.imread(output_file_img)
+        try:
+            rs1, rs2, rs3, acc1, acc2, acc3 = segment_it(image, label, classify=args.classify)
+        except:
+            totslice -= 1
+            totchannel -= 1
+            continue
+        if rs1 == -1 :
+            totslice -= 1
+            totchannel -= 1
+        else :
+            print(f"({width},{height},{i})")
+            totdice1 += rs1
+            totdice2 += rs2
+            totdice3 += rs3
+            if(args.classify):
+                totacc1 += acc1
+                totacc2 += acc2
+                totacc3 += acc3
+    
+    if(args.classify):
+        print(f"single point prompt classification accuracy is {totacc1 / totchannel}")
+        print(f"multiple points prompt classification accuracy is {totacc2 / totchannel}")
+        print(f"box prompt classification accuracy is {totacc3 / totchannel}")
+
     for i in range(width):
         image = adjustMethod1(get_slice(img, 0, i))
         label = get_slice(lab, 0, i)
@@ -351,14 +404,14 @@ if args.all_slice == True :
         plt.imsave(output_file_img, image, cmap='gray')
         image = cv2.imread(output_file_img)
         try:
-            rs1, rs2, rs3 = segment_it(image, label)
+            rs1, rs2, rs3, acc1, acc2, acc3 = segment_it(image, label)
         except:
             totslice -= 1
             continue
         if rs1 == -1 :
             totslice -= 1
         else :
-            print(f"({i},{height},{channel}")
+            print(f"({i},{height},{channel})")
             totdice1 += rs1
             totdice2 += rs2
             totdice3 += rs3
@@ -370,7 +423,7 @@ if args.all_slice == True :
         plt.imsave(output_file_img, image, cmap='gray')
         image = cv2.imread(output_file_img)
         try:
-            rs1, rs2, rs3 = segment_it(image, label)
+            rs1, rs2, rs3, acc1, acc2, acc3 = segment_it(image, label)
         except:
             totslice -= 1
             continue
@@ -378,25 +431,6 @@ if args.all_slice == True :
             totslice -= 1
         else :
             print(f"({width},{i},{channel}")
-            totdice1 += rs1
-            totdice2 += rs2
-            totdice3 += rs3
-
-    for i in range(channel):
-        image = adjustMethod1(get_slice(img, 2, i))
-        label = get_slice(lab, 2, i)
-        output_file_img = 'slice/img.png'
-        plt.imsave(output_file_img, image, cmap='gray')
-        image = cv2.imread(output_file_img)
-        try:
-            rs1, rs2, rs3 = segment_it(image, label, classify=args.classify)
-        except:
-            totslice -= 1
-            continue
-        if rs1 == -1 :
-            totslice -= 1
-        else :
-            print(f"({width},{height},{i}")
             totdice1 += rs1
             totdice2 += rs2
             totdice3 += rs3
@@ -419,4 +453,4 @@ elif args.all_slice == False :
     plt.imsave(output_file_img, image, cmap='gray')
     image = cv2.imread(output_file_img)
 
-    rs1, rs2, rs3 = segment_it(image, label, classify=args.classify)
+    rs1, rs2, rs3, acc1, acc2, acc3 = segment_it(image, label, classify=args.classify)
